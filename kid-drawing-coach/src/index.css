@@ -1,0 +1,202 @@
+/* src/index.css */
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #f3f4f6;
+  color: #111827;
+}
+
+.app-root {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 32px 16px;
+}
+
+.screen {
+  width: 100%;
+  max-width: 900px;
+}
+
+h1, h2, h3 {
+  margin: 0 0 12px;
+}
+
+.subtitle {
+  margin-bottom: 24px;
+  color: #4b5563;
+}
+
+.home-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.card {
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-top: 16px;
+  box-shadow: 0 10px 20px rgba(15, 23, 42, 0.08);
+}
+
+.form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.form-row label {
+  font-size: 0.9rem;
+  color: #4b5563;
+}
+
+input, select {
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid #d1d5db;
+  font-size: 0.95rem;
+}
+
+input:focus, select:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.4);
+}
+
+.primary-btn, .secondary-btn, .back-btn {
+  padding: 8px 16px;
+  border-radius: 999px;
+  border: none;
+  font-size: 0.95rem;
+  cursor: pointer;
+  font-weight: 500;
+  transition: transform 0.05s ease, box-shadow 0.05s ease, background 0.1s ease;
+}
+
+.primary-btn {
+  background: #3b82f6;
+  color: white;
+  box-shadow: 0 4px 10px rgba(37, 99, 235, 0.3);
+}
+
+.primary-btn:hover {
+  background: #2563eb;
+  transform: translateY(-1px);
+}
+
+.secondary-btn {
+  background: #e5e7eb;
+  color: #111827;
+}
+
+.secondary-btn:hover {
+  background: #d1d5db;
+}
+
+.back-btn {
+  margin-bottom: 8px;
+  background: transparent;
+  border: none;
+  color: #4b5563;
+  padding: 0;
+  cursor: pointer;
+}
+
+.back-btn:hover {
+  color: #111827;
+}
+
+.hint {
+  font-size: 0.85rem;
+  color: #6b7280;
+  margin-bottom: 8px;
+}
+
+.small {
+  font-size: 0.85rem;
+  color: #6b7280;
+}
+
+.actions-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  align-items: center;
+}
+
+.error-text {
+  color: #b91c1c;
+  font-size: 0.9rem;
+  margin-top: 8px;
+}
+
+.coach-comment {
+  margin-top: 8px;
+  font-size: 0.95rem;
+}
+
+.mood-row ul {
+  margin: 4px 0 0;
+  padding-left: 20px;
+  font-size: 0.9rem;
+}
+
+.progress-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.progress-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.progress-date {
+  width: 90px;
+  font-size: 0.85rem;
+  color: #4b5563;
+}
+
+.progress-bar-wrapper {
+  flex: 1;
+  background: #e5e7eb;
+  border-radius: 999px;
+  overflow: hidden;
+  height: 10px;
+}
+
+.progress-bar {
+  height: 100%;
+  background: #10b981;
+}
+
+.progress-score {
+  width: 130px;
+  font-size: 0.85rem;
+  text-align: right;
+}
+
+.stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  margin-top: 8px;
+}
+
+.stats-table th, .stats-table td {
+  border: 1px solid #e5e7eb;
+  padding: 6px 8px;
+}
+
+.stats-table th {
+  background: #f9fafb;
+  text-align: left;
+}
