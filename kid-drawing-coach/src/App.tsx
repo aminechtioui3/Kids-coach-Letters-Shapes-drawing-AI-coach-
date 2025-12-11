@@ -13,10 +13,9 @@ interface AttemptResponse {
   stress_level: number;
   coach_comment: string | null;
 
-  // NEW fields from backend
-  match_confidence?: number | null;           // probability it matches requested item
-  cnn_predicted_label?: string | null;        // model's top-1 label
-  cnn_predicted_confidence?: number | null;   // probability of that label
+  match_confidence?: number | null;
+  cnn_predicted_label?: string | null;
+  cnn_predicted_confidence?: number | null;
 }
 
 const API_BASE = 'http://localhost:8000';
@@ -63,7 +62,7 @@ const App: React.FC = () => {
         ended_at: new Date().toISOString(),
         num_corrections: 0,
         num_undos: 0,
-        face_mood: null, // we let the DL mood model decide using snapshots
+        face_mood: null,
         drawing_base64: null,
         face_snapshots: faceSnapshots,
         trajectory,
@@ -96,7 +95,8 @@ const App: React.FC = () => {
         minHeight: '100vh',
         padding: 24,
         background: '#f3f4f6',
-        fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+        fontFamily:
+          'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
       }}
     >
       <div
@@ -109,11 +109,10 @@ const App: React.FC = () => {
           boxShadow: '0 10px 25px rgba(15,23,42,0.1)',
         }}
       >
-        <h1 style={{ fontSize: 24, marginBottom: 16 }}>
-          Kid Drawing Coach 🎨
-        </h1>
+        <h1 style={{ fontSize: 24, marginBottom: 16 }}>Kid Drawing Coach 🎨</h1>
         <p style={{ fontSize: 14, color: '#4b5563', marginBottom: 24 }}>
-          Draw letters or shapes with your fingertip in the air while the camera tracks your mood.
+          Draw letters or shapes with your fingertip in the air while the camera
+          tracks your mood.
         </p>
 
         {/* Form */}
@@ -174,7 +173,9 @@ const App: React.FC = () => {
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             <label style={{ fontSize: 13 }}>
-              {itemType === 'LETTER' ? 'Letter (A–Z)' : 'Shape label (circle, star...)'}
+              {itemType === 'LETTER'
+                ? 'Letter (A–Z)'
+                : 'Shape label (circle, star...)'}
             </label>
             <input
               value={itemLabel}
@@ -280,8 +281,8 @@ const App: React.FC = () => {
                 {(result.stress_level * 100).toFixed(0)} %
               </p>
 
-              {/* NEW: letter/shape recognition feedback */}
-              {result.match_confidence != null && (
+              {/* Matching info */}
+              {typeof result.match_confidence === 'number' && (
                 <p style={{ fontSize: 14, marginBottom: 4 }}>
                   <strong>Match with your target "{itemLabel}":</strong>{' '}
                   {(result.match_confidence * 100).toFixed(1)} %
@@ -296,9 +297,8 @@ const App: React.FC = () => {
                     <>
                       {' '}
                       (
-                      {(result.cnn_predicted_confidence * 100).toFixed(1)}
-                      {' '}
-                      %)
+                      {(result.cnn_predicted_confidence * 100).toFixed(1)} %
+                      )
                     </>
                   )}
                 </p>

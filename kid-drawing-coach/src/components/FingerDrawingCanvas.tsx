@@ -69,16 +69,23 @@ const FingerDrawingCanvas: React.FC<FingerDrawingCanvasProps> = ({
       const isDrawing = indexTip.y < indexPip.y;
       drawingActiveRef.current = isDrawing;
 
-      const xNorm = indexTip.x; // already 0..1 in image coords
-      const yNorm = indexTip.y;
+      // ------------ HORIZONTAL FLIP HERE ------------
+      // MediaPipe x is in [0,1] from LEFT → RIGHT.
+      // We flip it so movements appear mirrored on the canvas.
+      const xNormFlipped = 1 - indexTip.x; // <== flip
+      const yNorm = indexTip.y;            // unchanged
+      // ------------------------------------------------
 
-      const px = xNorm * canvasEl.width;
+      const px = xNormFlipped * canvasEl.width;
       const py = yNorm * canvasEl.height;
 
       const t = (Date.now() - startedAt) / 1000;
 
       setPoints((prev) => {
-        const next: TrajectoryPoint[] = [...prev, { x: xNorm, y: yNorm, t }];
+        const next: TrajectoryPoint[] = [
+          ...prev,
+          { x: xNormFlipped, y: yNorm, t },
+        ];
 
         // Draw line from previous point if drawing is active
         if (isDrawing && prev.length > 0) {
@@ -119,7 +126,6 @@ const FingerDrawingCanvas: React.FC<FingerDrawingCanvasProps> = ({
           await hands.send({ image: videoEl });
         } catch (err) {
           // avoid noisy "Cannot pass deleted object" errors after unmount
-          // console.warn('Hands send error (ignored after close):', err);
         }
       },
       width: 640,
@@ -160,6 +166,8 @@ const FingerDrawingCanvas: React.FC<FingerDrawingCanvasProps> = ({
             borderRadius: 8,
             border: '1px solid #d1d5db',
             background: '#000',
+            // Optional: mirror the webcam preview too, so it feels natural
+            transform: 'scaleX(-1)',
           }}
           autoPlay
           muted

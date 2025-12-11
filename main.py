@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any
 
 import math
 import json
@@ -12,8 +12,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from sqlalchemy import (
-    create_engine, Column, Integer, String, DateTime, Boolean,
-    Float, ForeignKey, Text
+    create_engine,
+    Column,
+    Integer,
+    String,
+    DateTime,
+    Boolean,
+    Float,
+    ForeignKey,
+    Text,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 
@@ -24,13 +31,6 @@ from torchvision import transforms
 from PIL import Image, ImageDraw
 
 import numpy as np
-
-# Try to import FER. If it fails, mood will be disabled (but app still works).
-try:
-    from fer import FER  # type: ignore
-except Exception as e:
-    print(f"[WARN] Could not import FER from 'fer': {e}")
-    FER = None
 
 # ------------------------------------------------------------------------------------
 # PATHS & CONSTANTS
@@ -52,7 +52,6 @@ QUALITY_MODEL_PATH = MODELS_DIR / "quality_cnn.pth"
 # DB CONFIG
 # ------------------------------------------------------------------------------------
 
-# Example MySQL URL; adapt to your config.
 DATABASE_URL = "mysql+mysqlconnector://root:@localhost:3306/kidcoach"
 
 engine = create_engine(DATABASE_URL, echo=False, future=True)
@@ -123,7 +122,7 @@ class Attempt(Base):
     practice_item = relationship("PracticeItem", back_populates="attempts")
 
 
-# Create tables (dev-only; for prod use migrations)
+# Create tables (dev-only)
 Base.metadata.create_all(bind=engine)
 
 # ------------------------------------------------------------------------------------
@@ -169,11 +168,6 @@ class AttemptResponse(BaseModel):
     stress_level: float
     coach_comment: Optional[str]
 
-    # NEW: letter/shape recognition info
-    match_confidence: Optional[float] = None          # p(model says this matches requested item) in [0,1]
-    cnn_predicted_label: Optional[str] = None         # e.g. "A" or "Circle"
-    cnn_predicted_confidence: Optional[float] = None  # top-1 probability in [0,1]
-
 
 class SummaryStats(BaseModel):
     total_attempts: int
@@ -213,11 +207,6 @@ class ItemsStatsResponse(BaseModel):
 # ------------------------------------------------------------------------------------
 
 def compute_shakiness(trajectory: List[TrajectoryPoint]) -> float:
-    """
-    Simple shakiness metric based on the variation of movement direction
-    between consecutive segments.
-    High variance in angles => shakier movement.
-    """
     if len(trajectory) < 3:
         return 0.0
 
@@ -245,34 +234,28 @@ def compute_shakiness(trajectory: List[TrajectoryPoint]) -> float:
     var = sum((a - mean_angle) ** 2 for a in angles) / len(angles)
     shakiness = math.sqrt(var)
 
-    # normalize roughly between 0 and 1
     return min(shakiness / math.pi, 1.0)
 
 
 def simple_emotion_to_stress(face_mood: Optional[str]) -> float:
-    """
-    Map emotion label -> rough stress score.
-    This is deliberately soft so results feel more "logical".
-    """
     if face_mood is None:
-        return 0.35
+        return 0.3
 
     mood = face_mood.upper()
     if mood in ("HAPPY", "CALM", "RELAXED"):
-        return 0.25
+        return 0.1
     if mood in ("NEUTRAL", "SURPRISED"):
-        return 0.35
-    if mood in ("SAD", "CONFUSED", "FEAR"):
-        return 0.5
-    if mood in ("ANGRY", "DISGUST", "FRUSTRATED"):
+        return 0.3
+    if mood in ("SAD", "CONFUSED"):
         return 0.6
-    return 0.35
+    if mood in ("ANGRY", "FEAR", "DISGUST", "FRUSTRATED"):
+        return 0.8
+    return 0.3
 
 
 def score_quality_placeholder(item_type: str, item_label: str, trajectory: List[TrajectoryPoint]) -> float:
     """
-    Heuristic quality scoring based on path length.
-    Gives a reasonable base score even without DL model.
+    Simple readability score (0..100) based on path length.
     """
     if not trajectory:
         return 0.0
@@ -283,48 +266,22 @@ def score_quality_placeholder(item_type: str, item_label: str, trajectory: List[
         dy = trajectory[i].y - trajectory[i - 1].y
         length += math.hypot(dx, dy)
 
-    # Typical length ~0.3..1.5 → scale to 0..100
-    base_score = length * 150.0  # slightly reduced (was 180)
+    base_score = length * 180.0  # scale up a bit
 
-    # Small clamp + letter adjustments
     if item_type.upper() == "LETTER":
         if length < 0.3:
             base_score *= 0.6
         elif length > 1.5:
             base_score *= 0.8
 
-    # Minimum score if they actually drew something
     if length > 0.1:
         base_score = max(base_score, 20.0)
 
     return float(max(0.0, min(100.0, base_score)))
 
 
-def build_coach_comment(score: float, shakiness: float, stress: float) -> str:
-    parts: List[str] = []
-
-    if score >= 80:
-        parts.append("Great job! Your drawing looks very good.")
-    elif score >= 50:
-        parts.append("Nice work! A bit more practice and it will be perfect.")
-    else:
-        parts.append("Keep trying, you’re learning! Let’s draw a bit slower next time.")
-
-    if shakiness > 0.6:
-        parts.append("Try to move your hand more smoothly without quick jumps.")
-    elif shakiness > 0.3:
-        parts.append("Your lines are okay, but you can make them even smoother.")
-
-    if stress > 0.6:
-        parts.append("Take a deep breath and relax, drawing should be fun 😊.")
-    elif stress < 0.3:
-        parts.append("You seem relaxed, that’s great for learning!")
-
-    return " ".join(parts)
-
-
 # ------------------------------------------------------------------------------------
-# DEEP LEARNING: Quality CNN
+# DEEP LEARNING: Quality CNN for letters/shapes
 # ------------------------------------------------------------------------------------
 
 class QualityCNN(nn.Module):
@@ -380,11 +337,6 @@ def _load_quality_model():
 
 
 def letter_shape_to_class_index(item_type: str, item_label: str) -> Optional[int]:
-    """
-    Map (item_type, item_label) to the class index used in the CNN.
-    LETTER:A..Z -> 0..25
-    SHAPE:CIRCLE/SQUARE/TRIANGLE/STAR -> 26..29
-    """
     t = item_type.strip().upper()
 
     if t == "LETTER":
@@ -397,7 +349,6 @@ def letter_shape_to_class_index(item_type: str, item_label: str) -> Optional[int
 
     if t == "SHAPE":
         name = item_label.strip().upper()
-        # Try to be tolerant
         if "CIR" in name:
             name = "CIRCLE"
         elif "SQU" in name or "CARRE" in name:
@@ -414,155 +365,147 @@ def letter_shape_to_class_index(item_type: str, item_label: str) -> Optional[int
     return None
 
 
-def class_index_to_human_label(idx: int) -> str:
-    """
-    Reverse mapping from CNN index -> user-friendly label ("A", "Circle", etc.).
-    """
-    if 0 <= idx < NUM_LETTERS:
-        return chr(ord("A") + idx)
-    offset = idx - NUM_LETTERS
-    if 0 <= offset < len(SHAPE_LABELS):
-        return SHAPE_LABELS[offset].title()
-    return f"?{idx}"
-
-
 def render_trajectory_to_image(trajectory: List[TrajectoryPoint]) -> Image.Image:
     """
     Convert normalized trajectory points (x,y in [0,1]) to a 28x28 grayscale image.
-
-    IMPORTANT CHANGE:
-    - We center & scale the trajectory's bounding box so the letter fills the image.
-    - This makes air-drawing look closer to EMNIST-style centered letters.
+    We CENTER and SCALE the stroke so it looks more like EMNIST letters.
     """
     img = Image.new("L", (IMG_SIZE, IMG_SIZE), color=0)
-    draw = ImageDraw.Draw(img)
-
     if len(trajectory) < 2:
         return img
 
     xs = [p.x for p in trajectory]
     ys = [p.y for p in trajectory]
-
     min_x, max_x = min(xs), max(xs)
     min_y, max_y = min(ys), max(ys)
 
-    span_x = max_x - min_x
-    span_y = max_y - min_y
-    if span_x < 1e-6 or span_y < 1e-6:
+    width = max_x - min_x
+    height = max_y - min_y
+    if width <= 0 or height <= 0:
         return img
 
-    margin = 2  # pixels
-    usable_w = IMG_SIZE - 2 * margin
-    usable_h = IMG_SIZE - 2 * margin
+    # Use ~80% of the canvas for the bounding box
+    margin = 2
+    target_size = IMG_SIZE - 2 * margin
+    scale = target_size / max(width, height)
 
-    scale_x = usable_w / span_x
-    scale_y = usable_h / span_y
-    scale = min(scale_x, scale_y)
+    bbox_width_px = width * scale
+    bbox_height_px = height * scale
 
-    coords = []
-    for p in trajectory:
-        x = (p.x - min_x) * scale + margin
-        y = (p.y - min_y) * scale + margin
-        coords.append((x, y))
+    offset_x = (IMG_SIZE - bbox_width_px) / 2.0
+    offset_y = (IMG_SIZE - bbox_height_px) / 2.0
 
+    # If you want to flip horizontally, swap (1 - p.x) here
+    coords = [
+        (
+            (p.x - min_x) * scale + offset_x,
+            (p.y - min_y) * scale + offset_y,
+        )
+        for p in trajectory
+    ]
+
+    draw = ImageDraw.Draw(img)
     draw.line(coords, fill=255, width=2)
     return img
 
 
-def score_quality_with_model(
+def compute_quality_score_and_match(
     item_type: str,
     item_label: str,
     trajectory: List[TrajectoryPoint],
-) -> Tuple[Optional[float], Optional[float], Optional[str], Optional[float]]:
+):
     """
-    Use the trained CNN to compute:
-
-    - quality_score_for_target: probability the drawing is the *requested* letter/shape, mapped to [0,100].
-    - match_confidence: same probability but in [0,1].
-    - cnn_predicted_label: top-1 predicted letter/shape.
-    - cnn_predicted_confidence: top-1 probability in [0,1].
-
-    Returns (None, None, None, None) if model/label is not available.
+    Returns:
+      score (0..100),
+      match_conf (raw CNN prob for target),
+      match_pct (0..100 after smoothing),
+      pred_label (A..Z or shape),
+      pred_conf (model's best guess probability)
     """
-    if _quality_model is None:
-        return None, None, None, None
+    heur = score_quality_placeholder(item_type, item_label, trajectory)
+
+    if _quality_model is None or not trajectory:
+        print(
+            f"[QUALITY] type={item_type} label={item_label} len={len(trajectory)} "
+            f"heur={heur:.2f} match_conf=None pred_label=None pred_conf=None"
+        )
+        return heur, None, None, None, None
 
     class_idx = letter_shape_to_class_index(item_type, item_label)
-    if class_idx is None:
-        return None, None, None, None
-
-    if not trajectory:
-        return 0.0, 0.0, None, None
-
     img = render_trajectory_to_image(trajectory)
-    x = _quality_transform(img).unsqueeze(0).to(_quality_device)  # (1,1,28,28)
+    x = _quality_transform(img).unsqueeze(0).to(_quality_device)
 
     with torch.no_grad():
         logits = _quality_model(x)
         probs = torch.softmax(logits, dim=1)
-        p_target = float(probs[0, class_idx].item())
+        best_idx = int(probs.argmax(dim=1).item())
+        best_prob = float(probs[0, best_idx].item())
 
-        top_idx = int(probs[0].argmax().item())
-        p_top = float(probs[0, top_idx].item())
-        top_label = class_index_to_human_label(top_idx)
+        if class_idx is not None:
+            target_prob = float(probs[0, class_idx].item())
+        else:
+            target_prob = None
 
-    quality_score = p_target * 100.0
-    return quality_score, p_target, top_label, p_top
+    # Decode predicted label name
+    if best_idx < NUM_LETTERS:
+        pred_label = chr(ord("A") + best_idx)
+    else:
+        s_idx = best_idx - NUM_LETTERS
+        if 0 <= s_idx < len(SHAPE_LABELS):
+            pred_label = SHAPE_LABELS[s_idx]
+        else:
+            pred_label = f"IDX_{best_idx}"
 
+    # === NEW: smoothed match factor ===
+    if target_prob is None:
+        # No known mapping; just use readability × how "letter-like" it is
+        alignment = best_prob
+        match_conf = None
+        match_pct = None
+    else:
+        # target_prob is typically tiny with air-letters → boost it nonlinearly
+        # base comes from target_prob, bonus from best_prob
+        eps = 1e-4
+        base = (target_prob + eps) ** 0.35      # 0.0008 → ~0.08 instead of 0
+        bonus = 0.15 * best_prob                # add a bit of "you drew *some* letter"
+        alignment = min(1.0, base + bonus)      # clip to [0,1]
 
-def compute_final_quality_score(
-    item_type: str,
-    item_label: str,
-    trajectory: List[TrajectoryPoint],
-) -> Tuple[float, Optional[float], Optional[str], Optional[float]]:
-    """
-    Combine CNN score (if available) with a heuristic.
+        match_conf = target_prob
+        match_pct = alignment * 100.0
 
-    IMPORTANT:
-    - The heuristic is the baseline.
-    - The CNN can adjust the score but will NOT destroy a good heuristic score.
-    - Also returns classification info: match_confidence, cnn_predicted_label, cnn_predicted_confidence.
-    """
-    heuristic = score_quality_placeholder(item_type, item_label, trajectory)
-    quality_score, match_conf, pred_label, pred_conf = score_quality_with_model(
-        item_type, item_label, trajectory
-    )
+    score = float(max(0.0, min(100.0, heur * alignment)))
 
-    # Debug: print in backend console
     try:
+        mc = match_conf if match_conf is not None else 0.0
         print(
-            f"[QUALITY] type={item_type} label={item_label} "
-            f"len={len(trajectory)} cnn_quality={quality_score} "
-            f"heur={heuristic} match_conf={match_conf} pred={pred_label} pred_conf={pred_conf}"
+            f"[QUALITY] type={item_type} label={item_label} len={len(trajectory)} "
+            f"heur={heur:.2f} target_prob={mc:.6f} best_label={pred_label} best_prob={best_prob:.6f} "
+            f"alignment={alignment:.3f} score={score:.2f}"
         )
     except Exception:
         pass
 
-    # No model / unsupported label -> use heuristic
-    if quality_score is None:
-        final = float(max(0.0, min(100.0, heuristic)))
-        return final, None, None, None
-
-    # If trajectory is very short, rely mostly on heuristic
-    if len(trajectory) < 10:
-        final_score = heuristic
-    else:
-        # Blend but keep heuristic as "floor - 15"
-        raw = 0.3 * quality_score + 0.7 * heuristic
-        final_score = max(heuristic - 15.0, raw)
-
-    final_score = float(max(0.0, min(100.0, final_score)))
-    return final_score, match_conf, pred_label, pred_conf
+    return score, match_conf, match_pct, pred_label, best_prob
 
 
-# Load quality model at import time
+# load model at import
 _load_quality_model()
 
 # ------------------------------------------------------------------------------------
-# DEEP LEARNING: Face emotion from webcam snapshots
+# DEEP LEARNING: Face emotion from webcam snapshots (FER)
 # ------------------------------------------------------------------------------------
 
-_fer_detector: Optional[Any] = None
+try:
+    import fer as fer_module
+
+    FER = getattr(fer_module, "FER", None)
+    if FER is None:
+        print("[WARN] `fer` package imported but has no FER class. Face-based mood will be disabled.")
+except Exception as e:
+    FER = None
+    print(f"[WARN] Could not import `fer` package: {e}")
+
+_fer_detector = None
 if FER is not None:
     try:
         _fer_detector = FER(mtcnn=False)
@@ -571,7 +514,7 @@ if FER is not None:
         print(f"[WARN] Could not initialize FER: {e}")
         _fer_detector = None
 else:
-    print("[WARN] `fer` library not installed. Face-based mood will not be inferred.")
+    print("[WARN] `fer` library not installed or unusable. Face-based mood will not be inferred.")
 
 
 def _decode_base64_image(b64: str) -> Optional[np.ndarray]:
@@ -587,17 +530,12 @@ def _decode_base64_image(b64: str) -> Optional[np.ndarray]:
 
 
 def predict_mood_from_snapshots(face_snapshots: List[str]) -> Optional[str]:
-    """
-    Use FER on a handful of webcam frames to estimate the dominant emotion.
-    Returns something like "HAPPY", "NEUTRAL", "SAD", etc.
-    """
     if not face_snapshots or _fer_detector is None:
         return None
 
     emotions_sum: Dict[str, float] = {}
     count = 0
 
-    # Use up to first 5 snapshots
     for b64 in face_snapshots[:5]:
         arr = _decode_base64_image(b64)
         if arr is None:
@@ -623,7 +561,6 @@ def predict_mood_from_snapshots(face_snapshots: List[str]) -> Optional[str]:
     if not emotions_sum or count == 0:
         return None
 
-    # Average probabilities
     for k in list(emotions_sum.keys()):
         emotions_sum[k] /= count
 
@@ -639,7 +576,7 @@ def predict_mood_from_snapshots(face_snapshots: List[str]) -> Optional[str]:
         "surprise": "SURPRISED",
     }
     mood = mapping.get(best_label.lower(), best_label.upper())
-    print(f"[MOOD] FER predicted {mood} (p={best_val:.3f}) over {count} frames, raw={emotions_sum}")
+    print(f"[MOOD] FER predicted {mood} (p={best_val:.3f}) over {count} frames")
     return mood
 
 
@@ -684,6 +621,29 @@ def get_or_create_item(db: Session, item_type: str, label: str) -> PracticeItem:
     return item
 
 
+def build_coach_comment(score: float, shakiness: float, stress: float) -> str:
+    parts: List[str] = []
+
+    if score >= 80:
+        parts.append("Great job! Your drawing looks very good.")
+    elif score >= 50:
+        parts.append("Nice work! A bit more practice and it will be perfect.")
+    else:
+        parts.append("Keep trying, you’re learning! Let’s draw a bit slower next time.")
+
+    if shakiness > 0.6:
+        parts.append("Try to move your hand more smoothly without quick jumps.")
+    elif shakiness > 0.3:
+        parts.append("Your lines are okay, but you can make them even smoother.")
+
+    if stress > 0.6:
+        parts.append("Take a deep breath and relax, drawing should be fun 😊.")
+    elif stress < 0.3:
+        parts.append("You seem relaxed, that’s great for learning!")
+
+    return " ".join(parts)
+
+
 @app.post("/api/attempts", response_model=AttemptResponse)
 def create_attempt(payload: AttemptCreate, db: Session = Depends(get_db)):
     user = get_or_create_user(db, payload.user_name, payload.user_age)
@@ -692,26 +652,32 @@ def create_attempt(payload: AttemptCreate, db: Session = Depends(get_db)):
     duration = (payload.ended_at - payload.started_at).total_seconds()
     shakiness = compute_shakiness(payload.trajectory)
 
-    # 1) Get mood: either from explicit label or inferred from face snapshots
-    mood = payload.face_mood
+    # 1) Mood: FER on snapshots if any
+    mood = predict_mood_from_snapshots(payload.face_snapshots)
+
+    if not payload.face_snapshots:
+        print("[MOOD] No face snapshots received; falling back to NEUTRAL.")
+
+    # Fallback: use explicit label from front if FER failed
+    if mood is None and payload.face_mood:
+        mood = payload.face_mood
+
+    # Final fallback so UI never shows Unknown
     if mood is None:
-        mood = predict_mood_from_snapshots(payload.face_snapshots)
+        mood = "NEUTRAL"
 
-    # 2) Compute stress from mood + shakiness (softer mixing)
+    # 2) Stress from mood + shakiness
     stress_from_face = simple_emotion_to_stress(mood)
-    stress_level = stress_from_face * 0.7 + shakiness * 0.3
-    stress_level = float(min(max(stress_level, 0.0), 1.0))
+    stress_level = min(max(stress_from_face + shakiness * 0.5, 0.0), 1.0)
 
-    # 3) Drawing quality score (CNN + heuristic) + classification info
-    score, match_conf, pred_label, pred_conf = compute_final_quality_score(
+    # 3) Drawing quality score (readability × match)
+    score, match_conf, match_pct, pred_label, pred_conf = compute_quality_score_and_match(
         payload.item_type,
         payload.item_label,
         payload.trajectory,
     )
 
-    # Easier threshold for kids
     success = score >= 40.0
-
     coach_comment = build_coach_comment(score, shakiness, stress_level)
 
     extra: Dict[str, Any] = {
@@ -720,9 +686,10 @@ def create_attempt(payload: AttemptCreate, db: Session = Depends(get_db)):
         "num_points": len(payload.trajectory),
         "drawing_base64_saved": bool(payload.drawing_base64),
         "num_face_snapshots": len(payload.face_snapshots),
-        "match_confidence": match_conf,
-        "cnn_predicted_label": pred_label,
-        "cnn_predicted_confidence": pred_conf,
+        "match_conf": match_conf,
+        "match_pct": match_pct,
+        "predicted_label": pred_label,
+        "predicted_label_conf": pred_conf,
     }
 
     attempt = Attempt(
@@ -746,13 +713,23 @@ def create_attempt(payload: AttemptCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(attempt)
 
-    print(
-        f"[ATTEMPT] id={attempt.id} score={attempt.score:.2f} "
-        f"success={attempt.success} mood={attempt.predicted_mood} "
-        f"stress={attempt.stress_level:.2f} points={len(payload.trajectory)} "
-        f"snapshots={len(payload.face_snapshots)} "
-        f"match_conf={match_conf} pred_label={pred_label} pred_conf={pred_conf}"
-    )
+    try:
+        mc = match_conf if match_conf is not None else 0.0
+        pc = pred_conf if pred_conf is not None else 0.0
+        print(
+            f"[ATTEMPT] id={attempt.id}"
+            f" score={attempt.score:.2f}"
+            f" success={attempt.success}"
+            f" mood={attempt.predicted_mood}"
+            f" stress={attempt.stress_level:.2f}"
+            f" points={len(payload.trajectory)}"
+            f" snapshots={len(payload.face_snapshots)}"
+            f" target_prob={mc:.6f}"
+            f" pred_label={pred_label}"
+            f" pred_conf={pc:.6f}"
+        )
+    except Exception:
+        pass
 
     return AttemptResponse(
         id=attempt.id,
@@ -761,9 +738,6 @@ def create_attempt(payload: AttemptCreate, db: Session = Depends(get_db)):
         predicted_mood=attempt.predicted_mood,
         stress_level=attempt.stress_level,
         coach_comment=attempt.coach_comment,
-        match_confidence=match_conf,
-        cnn_predicted_label=pred_label,
-        cnn_predicted_confidence=pred_conf,
     )
 
 
@@ -840,10 +814,6 @@ def get_progress_stats(user_name: Optional[str] = None, db: Session = Depends(ge
 
 @app.get("/api/stats/by-item", response_model=ItemsStatsResponse)
 def get_stats_by_item(user_name: Optional[str] = None, db: Session = Depends(get_db)):
-    """
-    Returns per-letter / per-shape stats:
-    - attempts, avg score, success rate, avg duration, avg stress
-    """
     query = db.query(Attempt).join(PracticeItem)
     if user_name:
         user = db.query(User).filter(User.name == user_name).first()
