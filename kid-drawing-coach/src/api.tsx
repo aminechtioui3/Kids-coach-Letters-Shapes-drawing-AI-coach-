@@ -4,10 +4,12 @@ import type {
   AttemptResponse,
   SummaryStats,
   ProgressStats,
-  ItemsStatsResponse
+  ItemsStatsResponse,
+  UserSummary,
+  AttemptHistoryItem,
 } from './types';
 
-const API_BASE = 'http://localhost:8000'; 
+const API_BASE = 'http://localhost:8000';
 
 async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -28,29 +30,37 @@ export async function createAttempt(
   return handleResponse<AttemptResponse>(res);
 }
 
-export async function getSummary(
-  userName?: string
-): Promise<SummaryStats> {
+export async function getSummary(userName?: string): Promise<SummaryStats> {
   const url = new URL(`${API_BASE}/api/stats/summary`);
   if (userName) url.searchParams.set('user_name', userName);
   const res = await fetch(url.toString());
   return handleResponse<SummaryStats>(res);
 }
 
-export async function getProgress(
-  userName?: string
-): Promise<ProgressStats> {
+export async function getProgress(userName?: string): Promise<ProgressStats> {
   const url = new URL(`${API_BASE}/api/stats/progress`);
   if (userName) url.searchParams.set('user_name', userName);
   const res = await fetch(url.toString());
   return handleResponse<ProgressStats>(res);
 }
 
-export async function getItemStats(
-  userName?: string
-): Promise<ItemsStatsResponse> {
+export async function getItemStats(userName?: string): Promise<ItemsStatsResponse> {
   const url = new URL(`${API_BASE}/api/stats/by-item`);
   if (userName) url.searchParams.set('user_name', userName);
   const res = await fetch(url.toString());
   return handleResponse<ItemsStatsResponse>(res);
+}
+
+export async function getUsersWithStats(): Promise<UserSummary[]> {
+  const res = await fetch(`${API_BASE}/api/users/with-stats`);
+  return handleResponse<UserSummary[]>(res);
+}
+
+export async function getAttemptsHistory(
+  userName?: string
+): Promise<AttemptHistoryItem[]> {
+  const url = new URL(`${API_BASE}/api/attempts/history`);
+  if (userName) url.searchParams.set('user_name', userName);
+  const res = await fetch(url.toString());
+  return handleResponse<AttemptHistoryItem[]>(res);
 }
