@@ -1,8 +1,9 @@
+// src/components/FingerDrawingCanvas.tsx
 import React, { useEffect, useRef, useState } from 'react';
 import { Hands, type Results } from '@mediapipe/hands';
 import { Camera } from '@mediapipe/camera_utils';
 
-type TrajectoryPoint = { x: number; y: number; t: number };
+export type TrajectoryPoint = { x: number; y: number; t: number };
 
 interface FingerDrawingCanvasProps {
   onTrajectoryChange: (points: TrajectoryPoint[]) => void;
@@ -37,7 +38,7 @@ const FingerDrawingCanvas: React.FC<FingerDrawingCanvasProps> = ({
     onTrajectoryChange(points);
   }, [points, onTrajectoryChange]);
 
-  // Init MediaPipe Hands + Camera once
+  // Init MediaPipe Hands + Camera once per session
   useEffect(() => {
     const videoEl = videoRef.current;
     const canvasEl = canvasRef.current;
@@ -65,21 +66,25 @@ const FingerDrawingCanvas: React.FC<FingerDrawingCanvasProps> = ({
       const indexTip = landmarks[8]; // INDEX_FINGER_TIP
       const indexPip = landmarks[6]; // INDEX_FINGER_PIP
 
-      // Simple "pen down" logic: finger pointing up (tip above PIP)
+      // "Pen down": finger pointing up (tip above PIP)
       const isDrawing = indexTip.y < indexPip.y;
       drawingActiveRef.current = isDrawing;
 
-      // ------------ HORIZONTAL FLIP HERE ------------
-      // MediaPipe x is in [0,1] from LEFT → RIGHT.
-      // We flip it so movements appear mirrored on the canvas.
-      const xNormFlipped = 1 - indexTip.x; // <== flip
-      const yNorm = indexTip.y;            // unchanged
-      // ------------------------------------------------
+      // Normalized coordinates from Mediapipe
+      const xNormFlipped = 1 - indexTip.x; // flip horizontally for natural feel
+      const yNorm = indexTip.y;
 
       const px = xNormFlipped * canvasEl.width;
       const py = yNorm * canvasEl.height;
-
       const t = (Date.now() - startedAt) / 1000;
+
+      // 🔴 IMPORTANT CHANGE:
+      // Only record points (and therefore only send them to backend)
+      // when the "pen" is down. So the CNN sees only the strokes that
+      // are actually drawn on the canvas.
+      if (!isDrawing) {
+        return;
+      }
 
       setPoints((prev) => {
         const next: TrajectoryPoint[] = [
@@ -87,8 +92,8 @@ const FingerDrawingCanvas: React.FC<FingerDrawingCanvasProps> = ({
           { x: xNormFlipped, y: yNorm, t },
         ];
 
-        // Draw line from previous point if drawing is active
-        if (isDrawing && prev.length > 0) {
+        // Draw line from previous point
+        if (prev.length > 0) {
           const last = prev[prev.length - 1];
           ctx.strokeStyle = '#000000';
           ctx.lineWidth = 4;
@@ -97,6 +102,12 @@ const FingerDrawingCanvas: React.FC<FingerDrawingCanvasProps> = ({
           ctx.moveTo(last.x * canvasEl.width, last.y * canvasEl.height);
           ctx.lineTo(px, py);
           ctx.stroke();
+        } else {
+          // First point: just put a small dot so the stroke starts visible
+          ctx.fillStyle = '#000000';
+          ctx.beginPath();
+          ctx.arc(px, py, 2, 0, Math.PI * 2);
+          ctx.fill();
         }
 
         return next;
@@ -124,8 +135,8 @@ const FingerDrawingCanvas: React.FC<FingerDrawingCanvasProps> = ({
         if (!hands || cancelled) return;
         try {
           await hands.send({ image: videoEl });
-        } catch (err) {
-          // avoid noisy "Cannot pass deleted object" errors after unmount
+        } catch {
+          // ignore errors after unmount
         }
       },
       width: 640,
@@ -135,7 +146,6 @@ const FingerDrawingCanvas: React.FC<FingerDrawingCanvasProps> = ({
     camera.start();
 
     return () => {
-      // cleanup on unmount / hot reload
       cancelled = true;
       if (camera) {
         try {
@@ -152,11 +162,13 @@ const FingerDrawingCanvas: React.FC<FingerDrawingCanvasProps> = ({
         }
       }
     };
-  }, [startedAt]); // re-init only when a new "session" starts
+  }, [startedAt]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ fontSize: 14, fontWeight: 500 }}>Draw with your fingertip ✋</div>
+      <div style={{ fontSize: 14, fontWeight: 500 }}>
+        Draw with your fingertip ✋
+      </div>
       <div style={{ display: 'flex', gap: 12 }}>
         <video
           ref={videoRef}
@@ -166,7 +178,7 @@ const FingerDrawingCanvas: React.FC<FingerDrawingCanvasProps> = ({
             borderRadius: 8,
             border: '1px solid #d1d5db',
             background: '#000',
-            // Optional: mirror the webcam preview too, so it feels natural
+            // Mirror webcam preview for natural interaction
             transform: 'scaleX(-1)',
           }}
           autoPlay

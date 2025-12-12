@@ -1,5 +1,5 @@
-from datetime import datetime
-from typing import Optional, List, Dict, Any
+from datetime import datetime, date
+from typing import Optional, List, Dict, Any, Tuple
 
 import math
 import json
@@ -182,6 +182,7 @@ class ProgressPoint(BaseModel):
     avg_score: float
     total_attempts: int
     total_time_seconds: float
+    avg_stress_level: float
 
 
 class ProgressStats(BaseModel):
@@ -200,6 +201,30 @@ class ItemStats(BaseModel):
 
 class ItemsStatsResponse(BaseModel):
     items: List[ItemStats]
+
+
+class UserSummary(BaseModel):
+    name: str
+    age: Optional[int]
+    created_at: datetime
+    total_attempts: int
+    avg_score: float
+    avg_stress_level: float
+    last_attempt_at: Optional[datetime]
+
+
+class AttemptHistoryItem(BaseModel):
+    id: int
+    user_name: str
+    item_type: str
+    item_label: str
+    started_at: datetime
+    ended_at: datetime
+    duration_seconds: float
+    score: float
+    success: bool
+    predicted_mood: Optional[str]
+    stress_level: float
 
 
 # ------------------------------------------------------------------------------------
@@ -266,7 +291,7 @@ def score_quality_placeholder(item_type: str, item_label: str, trajectory: List[
         dy = trajectory[i].y - trajectory[i - 1].y
         length += math.hypot(dx, dy)
 
-    base_score = length * 180.0  # scale up a bit
+    base_score = length * 180.0  # scale up
 
     if item_type.upper() == "LETTER":
         if length < 0.3:
@@ -336,6 +361,23 @@ def _load_quality_model():
     print(f"[INFO] Loaded quality model from {QUALITY_MODEL_PATH}")
 
 
+def canonical_shape_label(label: str) -> Optional[str]:
+    if not label:
+        return None
+    name = label.strip().upper()
+    if "CIR" in name:
+        return "CIRCLE"
+    if "SQU" in name or "CARRE" in name:
+        return "SQUARE"
+    if "TRI" in name:
+        return "TRIANGLE"
+    if "STAR" in name or "ETOILE" in name:
+        return "STAR"
+    if name in SHAPE_LABELS:
+        return name
+    return None
+
+
 def letter_shape_to_class_index(item_type: str, item_label: str) -> Optional[int]:
     t = item_type.strip().upper()
 
@@ -348,17 +390,8 @@ def letter_shape_to_class_index(item_type: str, item_label: str) -> Optional[int
         return ord(ch) - ord("A")
 
     if t == "SHAPE":
-        name = item_label.strip().upper()
-        if "CIR" in name:
-            name = "CIRCLE"
-        elif "SQU" in name or "CARRE" in name:
-            name = "SQUARE"
-        elif "TRI" in name:
-            name = "TRIANGLE"
-        elif "STAR" in name or "ETOILE" in name:
-            name = "STAR"
-
-        if name not in SHAPE_LABELS:
+        name = canonical_shape_label(item_label)
+        if name is None:
             return None
         return NUM_LETTERS + SHAPE_LABELS.index(name)
 
@@ -368,7 +401,7 @@ def letter_shape_to_class_index(item_type: str, item_label: str) -> Optional[int
 def render_trajectory_to_image(trajectory: List[TrajectoryPoint]) -> Image.Image:
     """
     Convert normalized trajectory points (x,y in [0,1]) to a 28x28 grayscale image.
-    We CENTER and SCALE the stroke so it looks more like EMNIST letters.
+    Center + scale to look more like EMNIST strokes.
     """
     img = Image.new("L", (IMG_SIZE, IMG_SIZE), color=0)
     if len(trajectory) < 2:
@@ -384,7 +417,6 @@ def render_trajectory_to_image(trajectory: List[TrajectoryPoint]) -> Image.Image
     if width <= 0 or height <= 0:
         return img
 
-    # Use ~80% of the canvas for the bounding box
     margin = 2
     target_size = IMG_SIZE - 2 * margin
     scale = target_size / max(width, height)
@@ -395,7 +427,6 @@ def render_trajectory_to_image(trajectory: List[TrajectoryPoint]) -> Image.Image
     offset_x = (IMG_SIZE - bbox_width_px) / 2.0
     offset_y = (IMG_SIZE - bbox_height_px) / 2.0
 
-    # If you want to flip horizontally, swap (1 - p.x) here
     coords = [
         (
             (p.x - min_x) * scale + offset_x,
@@ -409,6 +440,182 @@ def render_trajectory_to_image(trajectory: List[TrajectoryPoint]) -> Image.Image
     return img
 
 
+def generate_saliency_image(
+    item_type: str,
+    item_label: str,
+    trajectory: List[TrajectoryPoint],
+) -> Tuple[str, Optional[str], float, float]:
+    """
+    Build a saliency heatmap for the drawing, showing which pixels
+    influenced the CNN prediction most.
+
+    Returns:
+      (data_url_png, predicted_label, predicted_conf, match_conf_for_target)
+    """
+    if _quality_model is None:
+        raise RuntimeError("Quality model not loaded")
+
+    if not trajectory:
+        raise RuntimeError("Empty trajectory")
+
+    class_idx = letter_shape_to_class_index(item_type, item_label)
+    img = render_trajectory_to_image(trajectory)
+    x = _quality_transform(img).unsqueeze(0).to(_quality_device)
+    x.requires_grad_(True)
+
+    _quality_model.zero_grad()
+    logits = _quality_model(x)
+    probs = torch.softmax(logits, dim=1)[0]
+    pred_idx = int(torch.argmax(probs).item())
+    pred_conf = float(probs[pred_idx].item())
+    match_conf = float(probs[class_idx].item()) if class_idx is not None else 0.0
+
+    # grad of predicted logit w.r.t input pixels
+    score_logit = logits[0, pred_idx]
+    score_logit.backward()
+    grad = x.grad[0, 0]  # (28,28)
+    saliency = grad.abs()
+    max_val = float(saliency.max().item())
+    if max_val > 0:
+        saliency = saliency / max_val
+
+    sal_np = saliency.cpu().numpy()
+
+    # upscale to 224x224 and overlay as red heatmap
+    size = 224
+    base_img = img.resize((size, size)).convert("L")
+    base_rgb = Image.merge("RGB", (base_img, base_img, base_img))
+    heat = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(heat)
+
+    h_src, w_src = sal_np.shape
+    for y in range(size):
+        src_y = int(y * h_src / size)
+        for x in range(size):
+            src_x = int(x * w_src / size)
+            val = float(sal_np[src_y, src_x])
+            if val <= 0.05:
+                continue
+            alpha = int(80 + 175 * val)  # 80-255
+            red = 255
+            green = int(64 + 80 * (1.0 - val))
+            blue = 0
+            draw.point((x, y), (red, green, blue, alpha))
+
+    combined = Image.alpha_composite(base_rgb.convert("RGBA"), heat)
+
+    buf = BytesIO()
+    combined.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    pred_label: Optional[str] = None
+    if pred_idx < NUM_LETTERS:
+        pred_label = chr(ord("A") + pred_idx)
+    else:
+        shape_idx = pred_idx - NUM_LETTERS
+        if 0 <= shape_idx < len(SHAPE_LABELS):
+            pred_label = SHAPE_LABELS[shape_idx]
+
+    data_url = f"data:image/png;base64,{b64}"
+    return data_url, pred_label, pred_conf, match_conf
+
+
+def shape_match_score(shape_name: str, trajectory: List[TrajectoryPoint]) -> float:
+    """
+    Heuristic [0..1] of how much the trajectory looks like a given SHAPE.
+    """
+    if not trajectory or shape_name not in SHAPE_LABELS:
+        return 0.0
+    if len(trajectory) < 5:
+        return 0.0
+
+    xs = [p.x for p in trajectory]
+    ys = [p.y for p in trajectory]
+
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    width = max_x - min_x
+    height = max_y - min_y
+    if width <= 0 or height <= 0:
+        return 0.0
+
+    aspect = min(width, height) / max(width, height)
+
+    def aspect_score_fn(a: float) -> float:
+        if a <= 0.4:
+            return 0.0
+        if a >= 0.9:
+            return 1.0
+        return (a - 0.4) / (0.9 - 0.4)
+
+    if shape_name == "CIRCLE":
+        cx = sum(xs) / len(xs)
+        cy = sum(ys) / len(ys)
+        rs = [math.hypot(x - cx, y - cy) for x, y in zip(xs, ys)]
+        r_mean = sum(rs) / len(rs)
+        if r_mean <= 0:
+            return 0.0
+        r_var = sum((r - r_mean) ** 2 for r in rs) / len(rs)
+        r_std = math.sqrt(r_var)
+        rel_std = r_std / r_mean
+        if rel_std >= 0.5:
+            radial_score = 0.0
+        else:
+            radial_score = 1.0 - (rel_std / 0.5)
+
+        return 0.6 * aspect_score_fn(aspect) + 0.4 * radial_score
+
+    seg_angles: List[float] = []
+    for i in range(1, len(trajectory)):
+        dx = trajectory[i].x - trajectory[i - 1].x
+        dy = trajectory[i].y - trajectory[i - 1].y
+        if dx == 0 and dy == 0:
+            continue
+        seg_angles.append(abs(math.atan2(dy, dx)))
+
+    if not seg_angles:
+        return 0.0
+
+    if shape_name == "SQUARE":
+        axis_scores = []
+        for ang in seg_angles:
+            mod = ang % (math.pi / 2)
+            dev = min(mod, (math.pi / 2) - mod)
+            if dev >= (math.pi / 8):
+                axis_scores.append(0.0)
+            else:
+                axis_scores.append(1.0 - dev / (math.pi / 8))
+        axis_align = sum(axis_scores) / len(axis_scores) if axis_scores else 0.0
+        return 0.5 * aspect_score_fn(aspect) + 0.5 * axis_align
+
+    if shape_name == "TRIANGLE" or shape_name == "STAR":
+        corners = 0
+        for i in range(1, len(trajectory) - 1):
+            x1 = trajectory[i].x - trajectory[i - 1].x
+            y1 = trajectory[i].y - trajectory[i - 1].y
+            x2 = trajectory[i + 1].x - trajectory[i].x
+            y2 = trajectory[i + 1].y - trajectory[i].y
+            if (x1 == 0 and y1 == 0) or (x2 == 0 and y2 == 0):
+                continue
+            dot = x1 * x2 + y1 * y2
+            mag1 = math.hypot(x1, y1)
+            mag2 = math.hypot(x2, y2)
+            if mag1 == 0 or mag2 == 0:
+                continue
+            cos_theta = max(min(dot / (mag1 * mag2), 1.0), -1.0)
+            angle = math.acos(cos_theta)
+            if angle > math.pi / 4:
+                corners += 1
+
+        if shape_name == "TRIANGLE":
+            return math.exp(-((corners - 3) ** 2) / 4.0)
+
+        if shape_name == "STAR":
+            return math.exp(-((corners - 8) ** 2) / 8.0)
+
+    return 0.0
+
+
 def compute_quality_score_and_match(
     item_type: str,
     item_label: str,
@@ -416,37 +623,54 @@ def compute_quality_score_and_match(
 ):
     """
     Returns:
-      score (0..100),
-      match_conf (raw CNN prob for target),
-      match_pct (0..100 after smoothing),
-      pred_label (A..Z or shape),
-      pred_conf (model's best guess probability)
+      score (0..100)             -> final score (quality × match to target)
+      match_conf (0..1 or None)  -> raw CNN probability for the target class
+      match_pct (0..100 or None) -> nicer % version of match_conf
+      pred_label (str or None)   -> best letter/shape according to CNN
+      pred_conf (0..1 or None)   -> confidence of pred_label
     """
+
+    # ===============================
+    # 1) Heuristic "quality" based on path length
+    # ===============================
     heur = score_quality_placeholder(item_type, item_label, trajectory)
 
+    # If there is some drawing but heur is tiny, give a small floor so
+    # the child still gets a non-zero base score.
+    if trajectory and heur < 5.0:
+        heur = 20.0
+
+    # If no model or no trajectory: fallback to heuristics only
     if _quality_model is None or not trajectory:
         print(
             f"[QUALITY] type={item_type} label={item_label} len={len(trajectory)} "
-            f"heur={heur:.2f} match_conf=None pred_label=None pred_conf=None"
+            f"heur={heur:.2f} (model_off) match_conf=None pred_label=None pred_conf=None"
         )
         return heur, None, None, None, None
 
+    # ===============================
+    # 2) CNN prediction
+    # ===============================
     class_idx = letter_shape_to_class_index(item_type, item_label)
+
     img = render_trajectory_to_image(trajectory)
     x = _quality_transform(img).unsqueeze(0).to(_quality_device)
 
     with torch.no_grad():
         logits = _quality_model(x)
-        probs = torch.softmax(logits, dim=1)
-        best_idx = int(probs.argmax(dim=1).item())
-        best_prob = float(probs[0, best_idx].item())
+        probs = torch.softmax(logits, dim=1)[0]
 
-        if class_idx is not None:
-            target_prob = float(probs[0, class_idx].item())
-        else:
-            target_prob = None
+    best_idx = int(probs.argmax().item())
+    best_prob = float(probs[best_idx].item())
 
-    # Decode predicted label name
+    # Probability for the *target* class (= how close to chosen letter/shape)
+    target_prob: Optional[float]
+    if class_idx is not None:
+        target_prob = float(probs[class_idx].item())
+    else:
+        target_prob = None  # e.g. unknown label
+
+    # Decode best label for display
     if best_idx < NUM_LETTERS:
         pred_label = chr(ord("A") + best_idx)
     else:
@@ -456,24 +680,44 @@ def compute_quality_score_and_match(
         else:
             pred_label = f"IDX_{best_idx}"
 
-    # === NEW: smoothed match factor ===
-    if target_prob is None:
-        # No known mapping; just use readability × how "letter-like" it is
-        alignment = best_prob
-        match_conf = None
-        match_pct = None
+    # ===============================
+    # 3) Extra heuristic for SHAPES
+    # ===============================
+    shape_alignment: Optional[float] = None
+    if item_type.strip().upper() == "SHAPE":
+        canon = canonical_shape_label(item_label)
+        if canon is not None:
+            # 0..1: how round / square / triangular etc. the trajectory looks
+            shape_alignment = shape_match_score(canon, trajectory)
+
+    # ===============================
+    # 4) Turn CNN confidence → alignment factor [0.15 .. 1.0]
+    #    so score never collapses to 0 but still rewards correct letters most.
+    # ===============================
+    if target_prob is not None:
+        match_raw = max(0.0, min(1.0, target_prob))
     else:
-        # target_prob is typically tiny with air-letters → boost it nonlinearly
-        # base comes from target_prob, bonus from best_prob
-        eps = 1e-4
-        base = (target_prob + eps) ** 0.35      # 0.0008 → ~0.08 instead of 0
-        bonus = 0.15 * best_prob                # add a bit of "you drew *some* letter"
-        alignment = min(1.0, base + bonus)      # clip to [0,1]
+        # If the label is weird, use the best class as a fallback
+        match_raw = max(0.0, min(1.0, best_prob))
 
-        match_conf = target_prob
-        match_pct = alignment * 100.0
+    # base_alignment grows with sqrt of probability:
+    #  - target_prob ~ 0.0  -> ~0.15 (child still gets some points)
+    #  - target_prob ~ 0.25 -> ~0.6
+    #  - target_prob ~ 0.60 -> ~0.85
+    base_alignment = 0.15 + 0.85 * math.sqrt(match_raw)
 
+    if shape_alignment is not None:
+        # For shapes we also blend in geometric similarity
+        alignment = min(1.0, 0.5 * base_alignment + 0.5 * shape_alignment)
+    else:
+        alignment = base_alignment
+
+    # ===============================
+    # 5) Final score: quality × alignment
+    # ===============================
     score = float(max(0.0, min(100.0, heur * alignment)))
+    match_conf = target_prob
+    match_pct = match_raw * 100.0 if target_prob is not None else None
 
     try:
         mc = match_conf if match_conf is not None else 0.0
@@ -644,6 +888,46 @@ def build_coach_comment(score: float, shakiness: float, stress: float) -> str:
     return " ".join(parts)
 
 
+class ExplainRequest(BaseModel):
+  item_type: str
+  item_label: str
+  trajectory: List[TrajectoryPoint]
+
+
+class ExplainResponseModel(BaseModel):
+  saliency_image: str
+  predicted_label: Optional[str]
+  predicted_confidence: float
+  match_confidence: float
+
+
+@app.post("/api/explain", response_model=ExplainResponseModel)
+def explain_attempt(payload: ExplainRequest):
+    if not payload.trajectory:
+        raise HTTPException(status_code=400, detail="Empty trajectory")
+    if _quality_model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Quality model not loaded on server.",
+        )
+
+    try:
+        img_b64, pred_label, pred_conf, match_conf = generate_saliency_image(
+            payload.item_type,
+            payload.item_label,
+            payload.trajectory,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return ExplainResponseModel(
+        saliency_image=img_b64,
+        predicted_label=pred_label,
+        predicted_confidence=pred_conf,
+        match_confidence=match_conf,
+    )
+
+
 @app.post("/api/attempts", response_model=AttemptResponse)
 def create_attempt(payload: AttemptCreate, db: Session = Depends(get_db)):
     user = get_or_create_user(db, payload.user_name, payload.user_age)
@@ -658,7 +942,7 @@ def create_attempt(payload: AttemptCreate, db: Session = Depends(get_db)):
     if not payload.face_snapshots:
         print("[MOOD] No face snapshots received; falling back to NEUTRAL.")
 
-    # Fallback: use explicit label from front if FER failed
+    # Fallback: explicit label from front if FER failed
     if mood is None and payload.face_mood:
         mood = payload.face_mood
 
@@ -670,7 +954,7 @@ def create_attempt(payload: AttemptCreate, db: Session = Depends(get_db)):
     stress_from_face = simple_emotion_to_stress(mood)
     stress_level = min(max(stress_from_face + shakiness * 0.5, 0.0), 1.0)
 
-    # 3) Drawing quality score (readability × match)
+    # 3) Drawing quality score (readability × match with selected item)
     score, match_conf, match_pct, pred_label, pred_conf = compute_quality_score_and_match(
         payload.item_type,
         payload.item_label,
@@ -767,8 +1051,8 @@ def get_summary_stats(user_name: Optional[str] = None, db: Session = Depends(get
 
     mood_counts: Dict[str, int] = {}
     for a in attempts:
-        mood = a.predicted_mood or "UNKNOWN"
-        mood_counts[mood] = mood_counts.get(mood, 0) + 1
+        mood_val = a.predicted_mood or "UNKNOWN"
+        mood_counts[mood_val] = mood_counts.get(mood_val, 0) + 1
 
     return SummaryStats(
         total_attempts=total_attempts,
@@ -800,16 +1084,208 @@ def get_progress_stats(user_name: Optional[str] = None, db: Session = Depends(ge
         total_attempts = len(bucket)
         total_time = sum(a.duration_seconds for a in bucket)
         avg_score = sum(a.score for a in bucket) / total_attempts
+        avg_stress = sum(a.stress_level for a in bucket) / total_attempts
         points.append(
             ProgressPoint(
                 date=date_str,
                 avg_score=avg_score,
                 total_attempts=total_attempts,
                 total_time_seconds=total_time,
+                avg_stress_level=avg_stress,
             )
         )
 
     return ProgressStats(points=points)
+
+
+class FrustratingItem(BaseModel):
+    item_type: str
+    label: str
+    attempts: int
+    avg_score: float
+    avg_stress: float
+
+
+class SuggestionModel(BaseModel):
+    item_type: str
+    label: str
+    reason: str
+
+
+class StudentGamification(BaseModel):
+    level: int
+    stars: int
+    badges: List[str]
+    today_attempts: int
+    today_goal: int
+
+
+class StudentInsightsResponse(BaseModel):
+    user_name: str
+    avg_score: float
+    avg_stress: float
+    success_rate: float
+    frustrating_items: List[FrustratingItem]
+    suggestions: List[SuggestionModel]
+    gamification: StudentGamification
+
+
+def _compute_student_insights(
+    user: User, db: Session
+) -> StudentInsightsResponse:
+    attempts = (
+        db.query(Attempt)
+        .join(PracticeItem, Attempt.practice_item_id == PracticeItem.id)
+        .filter(Attempt.user_id == user.id)
+        .order_by(Attempt.started_at.asc())
+        .all()
+    )
+
+    if not attempts:
+        gam = StudentGamification(
+            level=1,
+            stars=0,
+            badges=[],
+            today_attempts=0,
+            today_goal=5,
+        )
+        return StudentInsightsResponse(
+            user_name=user.name,
+            avg_score=0.0,
+            avg_stress=0.0,
+            success_rate=0.0,
+            frustrating_items=[],
+            suggestions=[],
+            gamification=gam,
+        )
+
+    total = len(attempts)
+    avg_score = sum(a.score for a in attempts) / total
+    avg_stress = sum(a.stress_level for a in attempts) / total
+    success_rate = sum(1 for a in attempts if a.success) / total * 100.0
+
+    # Count attempts for today
+    today = datetime.utcnow().date()
+    today_attempts = sum(1 for a in attempts if a.started_at.date() == today)
+
+    # Group by item
+    by_item: Dict[int, List[Attempt]] = {}
+    item_map: Dict[int, PracticeItem] = {}
+    for a in attempts:
+        pid = a.practice_item_id
+        by_item.setdefault(pid, []).append(a)
+        item_map[pid] = a.practice_item
+
+    frustrating: List[FrustratingItem] = []
+    letter_best_score: Dict[str, float] = {}
+    letter_counts: Dict[str, int] = {}
+
+    for pid, bucket in by_item.items():
+        item = item_map[pid]
+        n = len(bucket)
+        item_avg_score = sum(a.score for a in bucket) / n
+        item_avg_stress = sum(a.stress_level for a in bucket) / n
+
+        # frustration: low score + high stress + enough attempts
+        if item_avg_score < 50.0 and item_avg_stress > 0.5 and n >= 3:
+            frustrating.append(
+                FrustratingItem(
+                    item_type=item.item_type,
+                    label=item.label,
+                    attempts=n,
+                    avg_score=item_avg_score,
+                    avg_stress=item_avg_stress,
+                )
+            )
+
+        if item.item_type.upper() == "LETTER":
+            lbl = (item.label or "").strip().upper()
+            if not lbl:
+                continue
+            letter_counts[lbl] = letter_counts.get(lbl, 0) + n
+            best_old = letter_best_score.get(lbl, 0.0)
+            if item_avg_score > best_old:
+                letter_best_score[lbl] = item_avg_score
+
+    # Sort frustrating by "worst first"
+    frustrating.sort(
+        key=lambda f: (f.avg_stress, -f.avg_score),
+        reverse=True,
+    )
+
+    suggestions: List[SuggestionModel] = []
+    if frustrating:
+        for f in frustrating[:3]:
+            suggestions.append(
+                SuggestionModel(
+                    item_type=f.item_type,
+                    label=f.label,
+                    reason="High stress and low score. Good candidate for extra practice.",
+                )
+            )
+    else:
+        # fallback: suggest most frequently practiced letters
+        for lbl, cnt in sorted(
+            letter_counts.items(), key=lambda kv: kv[1], reverse=True
+        )[:3]:
+            suggestions.append(
+                SuggestionModel(
+                    item_type="LETTER",
+                    label=lbl,
+                    reason="Frequently practiced letter. Keep consolidating this skill.",
+                )
+            )
+
+    # Gamification
+    level = max(1, min(5, int(avg_score // 20) + 1))
+    stars = min(4, int(success_rate // 25))
+
+    badges: List[str] = []
+    avg_shakiness = sum(a.shakiness for a in attempts) / total
+
+    if avg_score >= 70.0 and total >= 10:
+        badges.append("Consistent Learner")
+    if avg_stress <= 0.35 and total >= 5:
+        badges.append("Calm Artist")
+    if avg_shakiness <= 0.35 and total >= 5:
+        badges.append("Smooth Lines")
+
+    mastered_letters = [
+        lbl
+        for lbl, s in letter_best_score.items()
+        if "A" <= lbl <= "F" and s >= 75.0
+    ]
+    if len(mastered_letters) >= 3:
+        badges.append("Letter Master A–F")
+
+    gam = StudentGamification(
+        level=level,
+        stars=stars,
+        badges=badges,
+        today_attempts=today_attempts,
+        today_goal=5,
+    )
+
+    return StudentInsightsResponse(
+        user_name=user.name,
+        avg_score=avg_score,
+        avg_stress=avg_stress,
+        success_rate=success_rate,
+        frustrating_items=frustrating,
+        suggestions=suggestions,
+        gamification=gam,
+    )
+
+
+@app.get("/api/insights/student", response_model=StudentInsightsResponse)
+def get_student_insights(
+    user_name: str, db: Session = Depends(get_db)
+):
+    user = db.query(User).filter(User.name == user_name).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return _compute_student_insights(user, db)
 
 
 @app.get("/api/stats/by-item", response_model=ItemsStatsResponse)
@@ -852,3 +1328,72 @@ def get_stats_by_item(user_name: Optional[str] = None, db: Session = Depends(get
         )
 
     return ItemsStatsResponse(items=items_stats)
+
+
+@app.get("/api/users/with-stats", response_model=List[UserSummary])
+def get_users_with_stats(db: Session = Depends(get_db)):
+    users = db.query(User).all()
+    summaries: List[UserSummary] = []
+
+    for u in users:
+        atts = db.query(Attempt).filter(Attempt.user_id == u.id).all()
+        if atts:
+            total = len(atts)
+            avg_score = sum(a.score for a in atts) / total
+            avg_stress = sum(a.stress_level for a in atts) / total
+            last_at = max(a.started_at for a in atts)
+        else:
+            total = 0
+            avg_score = 0.0
+            avg_stress = 0.0
+            last_at = None
+
+        summaries.append(
+            UserSummary(
+                name=u.name,
+                age=u.age,
+                created_at=u.created_at,
+                total_attempts=total,
+                avg_score=avg_score,
+                avg_stress_level=avg_stress,
+                last_attempt_at=last_at,
+            )
+        )
+
+    return summaries
+
+
+@app.get("/api/attempts/history", response_model=List[AttemptHistoryItem])
+def get_attempts_history(
+    user_name: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    query = (
+        db.query(Attempt, User, PracticeItem)
+        .join(User, Attempt.user_id == User.id)
+        .join(PracticeItem, Attempt.practice_item_id == PracticeItem.id)
+    )
+    if user_name:
+        query = query.filter(User.name == user_name)
+
+    rows = query.order_by(Attempt.started_at.desc()).all()
+    items: List[AttemptHistoryItem] = []
+
+    for a, u, item in rows:
+        items.append(
+            AttemptHistoryItem(
+                id=a.id,
+                user_name=u.name,
+                item_type=item.item_type,
+                item_label=item.label,
+                started_at=a.started_at,
+                ended_at=a.ended_at,
+                duration_seconds=a.duration_seconds,
+                score=a.score,
+                success=a.success,
+                predicted_mood=a.predicted_mood,
+                stress_level=a.stress_level,
+            )
+        )
+
+    return items

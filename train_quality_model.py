@@ -24,7 +24,7 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 IMG_SIZE = 28  # 28x28 images
 BATCH_SIZE = 256
-EPOCHS = 5
+EPOCHS = 8
 LEARNING_RATE = 1e-3
 
 NUM_LETTERS = 26  # A..Z
@@ -56,7 +56,7 @@ def build_label_mapping():
 
     return label_to_index
 
-    
+
 LABEL_TO_INDEX = build_label_mapping()
 
 
@@ -105,7 +105,7 @@ class EmnistLettersDataset(Dataset):
 
     IMPORTANT:
     We keep EMNIST's transform=None so that it returns a PIL Image.
-    Then we apply our own transform (ToTensor) here to avoid double ToTensor.
+    Then we apply our own transform (with augmentations for train) here.
     """
 
     def __init__(self, root: Path, train: bool, transform=None):
@@ -127,7 +127,7 @@ class EmnistLettersDataset(Dataset):
         # EMNIST letters labels: 1..26 => map to 0..25
         label = int(label) - 1
         if self.transform is not None:
-            img = self.transform(img)  # now ToTensor only once
+            img = self.transform(img)
         return img, label
 
 
@@ -179,7 +179,6 @@ class SyntheticShapesDataset(Dataset):
         r_outer = int(w * 0.4)
         r_inner = int(w * 0.18)
         points = []
-        # use Python math instead of torch here
         import math as pymath
         for i in range(10):
             angle = i * pymath.pi / 5.0
@@ -278,24 +277,63 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Using device: {device}")
 
-    transform = transforms.Compose([
+    # -----------------------------
+    # Data transforms
+    # -----------------------------
+    # TRAIN: add light augmentations so model becomes robust
+    # to flipped / slightly distorted trajectories from the canvas.
+    transform_train = transforms.Compose([
         transforms.Resize((IMG_SIZE, IMG_SIZE)),
-        transforms.ToTensor(),  # (H,W)->(1,H,W), [0,1]
+        transforms.RandomRotation(degrees=8, fill=0),
+        transforms.RandomAffine(
+            degrees=0,
+            translate=(0.08, 0.08),
+            scale=(0.9, 1.1),
+            fill=0,
+        ),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ToTensor(),
     ])
 
-    # EMNIST letters (now PIL->ToTensor done ONLY in our wrapper)
-    train_letters = EmnistLettersDataset(DATA_ROOT, train=True, transform=transform)
-    test_letters = EmnistLettersDataset(DATA_ROOT, train=False, transform=transform)
+    # EVAL: no augmentation, just a clean view of the data.
+    transform_eval = transforms.Compose([
+        transforms.Resize((IMG_SIZE, IMG_SIZE)),
+        transforms.ToTensor(),
+    ])
+
+    # EMNIST letters (now PIL->transform done ONLY in our wrapper)
+    train_letters = EmnistLettersDataset(DATA_ROOT, train=True, transform=transform_train)
+    test_letters = EmnistLettersDataset(DATA_ROOT, train=False, transform=transform_eval)
 
     # Synthetic shapes
-    train_shapes = SyntheticShapesDataset(num_per_class=2000, img_size=IMG_SIZE, transform=transform)
-    test_shapes = SyntheticShapesDataset(num_per_class=300, img_size=IMG_SIZE, transform=transform)
+    train_shapes = SyntheticShapesDataset(
+        num_per_class=2000,
+        img_size=IMG_SIZE,
+        transform=transform_train,
+    )
+    test_shapes = SyntheticShapesDataset(
+        num_per_class=300,
+        img_size=IMG_SIZE,
+        transform=transform_eval,
+    )
 
     train_dataset = ConcatDataset([train_letters, train_shapes])
     test_dataset = ConcatDataset([test_letters, test_shapes])
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
 
     model = QualityCNN(num_classes=NUM_CLASSES).to(device)
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
